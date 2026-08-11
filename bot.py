@@ -250,21 +250,37 @@ class BotService:
                 return
 
             if total > 6:
-                summary = f"<b>Найдено касс: {total} шт.</b>\nПолный список — в файле."
+                nearest = result.cash_registers[:2]
+                remaining = result.cash_registers[2:]
+                summary = (
+                    f"<b>Найдено касс: {total} шт.</b>\n"
+                    "Две ближайшие замены показаны ниже. "
+                    f"Остальные {len(remaining)} шт. — в файле."
+                )
                 try:
                     await status.edit_text(summary, parse_mode="HTML")
                 except TelegramAPIError:
                     await message.answer(summary, parse_mode="HTML")
+
+                for index, item in enumerate(nearest, 1):
+                    await message.answer(
+                        format_kkt(item, index),
+                        parse_mode="HTML",
+                    )
+
                 with TemporaryDirectory(prefix="inn_bot_") as directory:
-                    output = Path(directory) / f"kkt_{inn}.xlsx"
+                    output = Path(directory) / f"kkt_{inn}_remaining.xlsx"
                     await asyncio.to_thread(
                         export_kkt,
-                        result.cash_registers,
+                        remaining,
                         output,
                     )
                     await message.answer_document(
                         FSInputFile(output, filename=output.name),
-                        caption=f"Кассы по ИНН {inn}: {total} шт.",
+                        caption=(
+                            f"Остальные кассы по ИНН {inn}: "
+                            f"{len(remaining)} шт."
+                        ),
                         reply_markup=MENU,
                     )
                 return

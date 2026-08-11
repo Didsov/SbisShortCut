@@ -101,6 +101,20 @@ def _parse(item: dict, owner_inn: str) -> KKTInfo | None:
     )
 
 
+def replacement_sort_key(
+    item: KKTInfo,
+    *,
+    today: date | None = None,
+) -> tuple[int, str, str]:
+    """Сортирует кассы по близости даты замены ФН к текущему дню."""
+    report_date = today or date.today()
+    try:
+        fn_date = date.fromisoformat(str(item.fn_end_date)[:10])
+    except (TypeError, ValueError):
+        return (10**9, str(item.fn_end_date or ""), item.reg_number)
+    return (abs((fn_date - report_date).days), fn_date.isoformat(), item.reg_number)
+
+
 def find_all_kkt_by_owner_inn(
     owner_inn: str,
     *,
@@ -120,7 +134,7 @@ def find_all_kkt_by_owner_inn(
             continue
         seen.add(parsed.reg_number)
         selected.append(parsed)
-    selected.sort(key=lambda item: (item.fn_end_date or "", item.reg_number))
+    selected.sort(key=replacement_sort_key)
     if status_callback:
         status_callback("Формирую результат…")
     errors = tuple(str(error) for error in (raw.get("errors") or []))

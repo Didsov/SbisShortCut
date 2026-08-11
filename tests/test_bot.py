@@ -4,7 +4,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from bot import WhitelistStore, format_kkt, normalize_inn
-from lookup import KKTInfo, find_all_kkt_by_owner_inn
+from datetime import date
+
+from lookup import KKTInfo, find_all_kkt_by_owner_inn, replacement_sort_key
 
 
 class BotTests(unittest.TestCase):
@@ -53,6 +55,32 @@ class BotTests(unittest.TestCase):
         self.assertIn("<b>Касса №1</b>", text)
         self.assertIn("<code>1234567890</code>", text)
         self.assertIn("Иванов &lt;И.И.&gt;", text)
+
+    def test_replacement_sort_uses_nearest_fn_date(self) -> None:
+        def item(fn_end_date: str, reg_number: str) -> KKTInfo:
+            return KKTInfo(
+                owner_inn="1234567890",
+                owner_name=None,
+                model=None,
+                reg_number=reg_number,
+                manufacturer_number=None,
+                fn_end_date=fn_end_date,
+                ofd_end_date=None,
+            )
+
+        items = [
+            item("2018-01-01", "old"),
+            item("2026-08-12", "near"),
+            item("2026-09-01", "later"),
+        ]
+        ordered = sorted(
+            items,
+            key=lambda value: replacement_sort_key(
+                value,
+                today=date(2026, 8, 11),
+            ),
+        )
+        self.assertEqual([value.reg_number for value in ordered], ["near", "later", "old"])
 
     @patch("lookup.collect_kkt_by_inn")
     def test_old_kkt_is_not_filtered(self, collector) -> None:
