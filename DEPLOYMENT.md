@@ -81,9 +81,11 @@ sudo -u inntophone -H .venv/bin/python -c \
 
 ## 6. systemd-служба
 
-От `root` создайте `/etc/systemd/system/sbis-shortcut.service`:
+От `root` выполните команду, которая создаст
+`/etc/systemd/system/sbis-shortcut.service`:
 
-```ini
+```bash
+cat > /etc/systemd/system/sbis-shortcut.service <<'EOF'
 [Unit]
 Description=SbisShortCut Telegram bot
 Wants=network-online.target
@@ -104,15 +106,33 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-Активируйте службу:
+Проверьте синтаксис unit-файла:
+
+```bash
+systemd-analyze verify /etc/systemd/system/sbis-shortcut.service
+```
+
+Если команда не вывела ошибок, перечитайте конфигурацию systemd, добавьте
+службу в автозапуск и сразу запустите её:
 
 ```bash
 systemctl daemon-reload
 systemctl enable --now sbis-shortcut.service
 systemctl status sbis-shortcut.service --no-pager
 ```
+
+Проверить, включён ли автозапуск:
+
+```bash
+systemctl is-enabled sbis-shortcut.service
+systemctl is-active sbis-shortcut.service
+```
+
+После успешного запуска обе команды должны вывести соответственно `enabled`
+и `active`.
 
 Одновременно должен работать только один экземпляр этого Telegram-бота. Не
 запускайте `bot.py` вручную, пока активна `sbis-shortcut.service`.
@@ -155,4 +175,3 @@ systemctl status sbis-shortcut.service --no-pager
 ```bash
 systemctl disable --now sbis-shortcut.service
 ```
-
