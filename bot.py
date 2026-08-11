@@ -1,13 +1,11 @@
 import asyncio
-import json
-import os
+import html
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import RLock
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -26,9 +24,8 @@ from aiogram.types import (
 )
 
 from config.settings import Settings, load_settings
-from kkt_lookup import KKTInfo, KKTLookupResult, find_all_kkt_by_owner_inn
-from storage import database
-from storage.export_excel import export_kkt_lookup_excel
+from excel_export import export_kkt
+from lookup import KKTInfo, KKTLookupResult, find_all_kkt_by_owner_inn
 
 
 SEARCH_BUTTON = "🔎 Поиск по ИНН"
@@ -51,71 +48,13 @@ def normalize_inn(value: str) -> str:
 
 
 class WhitelistStore:
-    """Постоянный whitelist; администраторы берутся только из `.env`."""
+    """Белый список из `.env`, без файлового или иного хранилища."""
 
-    def __init__(self, path: Path, admins: frozenset[int]) -> None:
-        self.path = path
-        self.admins = admins
-        self._users: set[int] = set()
-        self._lock = RLock()
-        if path.is_file():
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            self._users = {int(value) for value in payload["allowed_user_ids"]}
-            self._users.difference_update(admins)
-
-    def is_admin(self, user_id: int) -> bool:
-        return user_id in self.admins
+    def __init__(self, allowed_user_ids: frozenset[int]) -> None:
+        self.allowed_user_ids = allowed_user_ids
 
     def is_allowed(self, user_id: int) -> bool:
-        with self._lock:
-            return user_id in self.admins or user_id in self._users
-
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        try:
-            temporary.write_text(
-                json.dumps(
-                    {"allowed_user_ids": sorted(self._users)},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    def add(self, user_id: int) -> bool:
-        with self._lock:
-            if self.is_allowed(user_id):
-                return False
-            self._users.add(user_id)
-            try:
-                self._save()
-            except Exception:
-                self._users.remove(user_id)
-                raise
-            return True
-
-    def remove(self, user_id: int) -> bool:
-        if self.is_admin(user_id):
-            raise PermissionError("Администратора нельзя удалить")
-        with self._lock:
-            if user_id not in self._users:
-                return False
-            self._users.remove(user_id)
-            try:
-                self._save()
-            except Exception:
-                self._users.add(user_id)
-                raise
-            return True
-
-    def all(self) -> tuple[int, ...]:
-        with self._lock:
-            return tuple(sorted(self.admins | self._users))
+        return user_id in self.allowed_user_ids
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -143,37 +82,24 @@ class AccessMiddleware(BaseMiddleware):
 
 def format_kkt(item: KKTInfo, number: int) -> str:
     def shown(value: str | None) -> str:
-        return str(value).strip() if value else "—"
+        text = str(value).strip() if value else "—"
+        return f"<code>{html.escape(text)}</code>"
 
     return "\n".join(
         (
-            f"Касса {number}",
-            f"ИНН владельца: {shown(item.owner_inn)}",
-            f"ФИО владельца: {shown(item.owner_name)}",
-            f"Модель кассы: {shown(item.model)}",
-            f"Рег. номер: {shown(item.reg_number)}",
-            f"Заводской номер: {shown(item.manufacturer_number)}",
-            f"Срок ФН: {shown(item.fn_end_date)}",
-            f"Срок ОФД: {shown(item.ofd_end_date)}",
+            f"<b>Касса №{number}</b>",
+            "",
+            f"<b>ИНН владельца:</b> {shown(item.owner_inn)}",
+            f"<b>Владелец:</b> {shown(item.owner_name)}",
+            f"<b>Модель:</b> {shown(item.model)}",
+            f"<b>РНМ:</b> {shown(item.reg_number)}",
+            f"<b>Заводской номер:</b> {shown(item.manufacturer_number)}",
+            f"<b>Срок ФН:</b> {shown(item.fn_end_date)}",
+            f"<b>Срок ОФД:</b> {shown(item.ofd_end_date)}",
+            "",
+            f"<b>Адрес точки продаж:</b> {shown(item.sales_point_address)}",
         )
     )
-
-
-def format_result(result: KKTLookupResult, limit: int = 3900) -> tuple[str, int]:
-    total = len(result.cash_registers)
-    if not total:
-        return f"ИНН владельца: {result.owner_inn}\nПодходящие ККТ не найдены.", 0
-
-    sections: list[str] = []
-    shown_count = 0
-    for index, item in enumerate(result.cash_registers, 1):
-        candidate = [*sections, format_kkt(item, index)]
-        footer = f"\nПоказано: {index} из {total}."
-        if len("\n\n".join(candidate) + footer) > limit:
-            break
-        sections = candidate
-        shown_count = index
-    return "\n\n".join(sections) + f"\n\nПоказано: {shown_count} из {total}.", shown_count
 
 
 class BotService:
@@ -200,8 +126,12 @@ class BotService:
         status = await message.answer("Получаю ККТ из СБИС…", reply_markup=MENU)
         loop = asyncio.get_running_loop()
 
+        async def update_status(text: str) -> None:
+            """Преобразует aiogram awaitable в настоящую coroutine."""
+            await status.edit_text(text)
+
         def report(text: str) -> None:
-            future = asyncio.run_coroutine_threadsafe(status.edit_text(text), loop)
+            future = asyncio.run_coroutine_threadsafe(update_status(text), loop)
             try:
                 future.result(timeout=15)
             except Exception:
@@ -211,29 +141,51 @@ class BotService:
             result = await asyncio.to_thread(
                 find_all_kkt_by_owner_inn,
                 inn,
-                verbose=False,
-                save_to_database=True,
                 status_callback=report,
             )
-            preview, shown_count = format_result(result)
-            try:
-                await status.edit_text(preview)
-            except TelegramAPIError:
-                await message.answer(preview)
+            total = len(result.cash_registers)
+            if total == 0:
+                text = "Действующих касс в ОФД СБИС нет."
+                try:
+                    await status.edit_text(text)
+                except TelegramAPIError:
+                    await message.answer(text, reply_markup=MENU)
+                return
 
-            if shown_count < len(result.cash_registers):
+            if total > 6:
+                summary = f"<b>Найдено касс: {total} шт.</b>\nПолный список — в файле."
+                try:
+                    await status.edit_text(summary, parse_mode="HTML")
+                except TelegramAPIError:
+                    await message.answer(summary, parse_mode="HTML")
                 with TemporaryDirectory(prefix="inn_bot_") as directory:
                     output = Path(directory) / f"kkt_{inn}.xlsx"
                     await asyncio.to_thread(
-                        export_kkt_lookup_excel,
-                        cash_registers=result.cash_registers,
-                        output_path=output,
+                        export_kkt,
+                        result.cash_registers,
+                        output,
                     )
                     await message.answer_document(
                         FSInputFile(output, filename=output.name),
-                        caption=f"Все ККТ по ИНН {inn}.",
+                        caption=f"Кассы по ИНН {inn}: {total} шт.",
                         reply_markup=MENU,
                     )
+                return
+
+            try:
+                await status.edit_text(
+                    f"<b>Найдено касс: {total} шт.</b>",
+                    parse_mode="HTML",
+                )
+            except TelegramAPIError:
+                pass
+
+            for index, item in enumerate(result.cash_registers, 1):
+                await message.answer(
+                    format_kkt(item, index),
+                    parse_mode="HTML",
+                    reply_markup=MENU if index == total else None,
+                )
         except Exception as error:
             print(f"Ошибка поиска по ИНН: {type(error).__name__}: {error}")
             await message.answer(
@@ -244,31 +196,17 @@ class BotService:
             self._active_users.discard(sender.id)
 
 
-def parse_user_id(value: str | None) -> int:
-    text = str(value or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        raise ValueError
-    return int(text)
-
-
 def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
     router = Router(name="inn_lookup")
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     router.message.outer_middleware(AccessMiddleware(whitelist))
-
-    async def require_admin(message: Message) -> bool:
-        sender = message.from_user
-        if sender is not None and whitelist.is_admin(sender.id):
-            return True
-        await message.answer("Команда доступна только администратору.")
-        return False
 
     @router.message(Command(commands=["start", "help", "menu"]))
     async def menu(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Отправьте ИНН владельца из 10 или 12 цифр.\n"
-            "Бот получит его ККТ из СБИС и сохранит их в локальную базу.",
+            "Бот получит его ККТ напрямую из СБИС.",
             reply_markup=MENU,
         )
 
@@ -304,38 +242,6 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
         await state.clear()
         await service.search(message, inn)
 
-    @router.message(Command("allow"))
-    async def allow(message: Message, command: CommandObject) -> None:
-        if not await require_admin(message):
-            return
-        try:
-            user_id = parse_user_id(command.args)
-            added = await asyncio.to_thread(whitelist.add, user_id)
-        except ValueError:
-            await message.answer("Использование: /allow TELEGRAM_USER_ID")
-            return
-        await message.answer("Пользователь добавлен." if added else "Доступ уже разрешён.")
-
-    @router.message(Command("deny"))
-    async def deny(message: Message, command: CommandObject) -> None:
-        if not await require_admin(message):
-            return
-        try:
-            user_id = parse_user_id(command.args)
-            removed = await asyncio.to_thread(whitelist.remove, user_id)
-        except ValueError:
-            await message.answer("Использование: /deny TELEGRAM_USER_ID")
-            return
-        except PermissionError:
-            await message.answer("Администратора нельзя удалить.")
-            return
-        await message.answer("Пользователь удалён." if removed else "Пользователь не найден.")
-
-    @router.message(Command("whitelist"))
-    async def whitelist_command(message: Message) -> None:
-        if await require_admin(message):
-            await message.answer("Разрешённые Telegram ID:\n" + "\n".join(map(str, whitelist.all())))
-
     @router.message(F.text)
     async def automatic_search(message: Message, state: FSMContext) -> None:
         try:
@@ -350,10 +256,7 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
 
 
 async def run(settings: Settings) -> None:
-    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
-    database.configure_database(settings.database_path)
-    database.init_db()
-    whitelist = WhitelistStore(settings.whitelist_path, settings.admin_user_ids)
+    whitelist = WhitelistStore(settings.allowed_user_ids)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(BotService(), whitelist))
 
@@ -387,4 +290,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
