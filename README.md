@@ -26,7 +26,8 @@ Copy-Item .env.example .env
 .venv\Scripts\python.exe bot.py
 ```
 
-Команды бота: `/start`, `/inn`, `/whoami`. Если пользователя нет в белом
+Команды бота: `/start`, `/inn`, `/checkAcc ИНН`, `/whoami`. Диагностическая
+команда `/checkAcc` показывает число активных аккаунтов и ККТ в каждом. Если пользователя нет в белом
 списке, бот возвращает его Telegram ID и не выполняет запрос к СБИС.
 Администраторы добавляют пользователей командой `/allow USER_ID`, удаляют
 командой `/deny USER_ID` и просматривают список командой `/whitelist`.
@@ -41,3 +42,6 @@ Copy-Item .env.example .env
 
 Пошаговая установка под systemd и пользователя `inntophone` описана в
 [DEPLOYMENT.md](DEPLOYMENT.md).
+
+Описание уровней дедупликации, причин пропуска и эталонного теста находится в
+[DEDUPLICATION.md](DEDUPLICATION.md).

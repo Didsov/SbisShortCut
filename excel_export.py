@@ -2,7 +2,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from lookup import KKTInfo
+from lookup import KKTInfo, fn_replacement_status
 
 
 def export_kkt(items: tuple[KKTInfo, ...], output_path: Path) -> int:
@@ -20,6 +20,9 @@ def export_kkt(items: tuple[KKTInfo, ...], output_path: Path) -> int:
             "Срок ФН",
             "Срок ОФД",
             "Адрес точки продаж",
+            "ID аккаунта",
+            "Название аккаунта",
+            "Статус замены ФН",
         ]
     )
     for item in items:
@@ -33,6 +36,9 @@ def export_kkt(items: tuple[KKTInfo, ...], output_path: Path) -> int:
                 item.fn_end_date,
                 item.ofd_end_date,
                 item.sales_point_address,
+                item.account_id,
+                item.account_name,
+                " ".join(fn_replacement_status(item)),
             ]
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)

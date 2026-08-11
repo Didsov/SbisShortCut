@@ -28,7 +28,14 @@ from aiogram.types import (
 
 from config.settings import Settings, load_settings
 from excel_export import export_kkt
-from lookup import KKTInfo, KKTLookupResult, find_all_kkt_by_owner_inn
+from lookup import (
+    KKTInfo,
+    KKTLookupResult,
+    find_all_kkt_by_owner_inn,
+    fn_replacement_status,
+    replacement_sort_key,
+)
+from services.live_collector import collect_kkt_by_inn
 
 
 SEARCH_BUTTON = "🔎 Поиск по ИНН"
@@ -182,10 +189,13 @@ def format_kkt(item: KKTInfo, number: int) -> str:
         text = str(value).strip() if value else "—"
         return f"<code>{html.escape(text)}</code>"
 
+    marker, replacement_status = fn_replacement_status(item)
     return "\n".join(
         (
-            f"<b>Касса №{number}</b>",
+            f"{marker} <b>Касса №{number}</b>",
             "",
+            f"<b>Статус замены:</b> {marker} {html.escape(replacement_status)}",
+            f"<b>Аккаунт:</b> {shown(account_label(item))}",
             f"<b>ИНН владельца:</b> {shown(item.owner_inn)}",
             f"<b>Владелец:</b> {shown(item.owner_name)}",
             f"<b>Модель:</b> {shown(item.model)}",
@@ -199,11 +209,77 @@ def format_kkt(item: KKTInfo, number: int) -> str:
     )
 
 
+def account_label(item: KKTInfo) -> str:
+    account_id = str(item.account_id) if item.account_id is not None else "—"
+    return (
+        f"{account_id} — {item.account_name}"
+        if item.account_name
+        else account_id
+    )
+
+
+def group_kkt_by_account(
+    items: tuple[KKTInfo, ...],
+) -> list[tuple[str, list[KKTInfo]]]:
+    grouped: dict[tuple[int | None, str | None], list[KKTInfo]] = {}
+    for item in items:
+        key = (item.account_id, item.account_name)
+        grouped.setdefault(key, []).append(item)
+    return [(account_label(values[0]), values) for values in grouped.values()]
+
+
+def format_account_statistics(statistics: dict, number: int) -> str:
+    account_id = html.escape(str(statistics.get("account_id") or "—"))
+    account_name = html.escape(str(statistics.get("account_name") or "Без названия"))
+    lines = [
+            f"<b>Аккаунт №{number}</b>",
+            f"<b>ID:</b> <code>{account_id}</code>",
+            f"<b>Название:</b> <code>{account_name}</code>",
+            f"<b>ККТ в Registry:</b> <code>{int(statistics.get('registry_kkt_count') or 0)}</code>",
+            f"<b>Карточек KKT.Read:</b> <code>{int(statistics.get('loaded_kkt_count') or 0)}</code>",
+            f"<b>Пропущено:</b> <code>{int(statistics.get('skipped_count') or 0)}</code>",
+            f"<b>Ошибок:</b> <code>{int(statistics.get('error_count') or 0)}</code>",
+    ]
+    reasons = statistics.get("skip_reasons") or {}
+    if reasons:
+        lines.append("<b>Причины пропуска:</b>")
+        for reason, count in sorted(reasons.items()):
+            lines.append(f"<code>{html.escape(str(reason))}: {int(count)}</code>")
+    return "\n".join(lines)
+
+
 class BotService:
     def __init__(self, cooldown: float = 5.0) -> None:
         self.cooldown = cooldown
         self._last_lookup: dict[int, float] = {}
         self._active_users: set[int] = set()
+
+    async def send_grouped_kkt(
+        self,
+        message: Message,
+        items: tuple[KKTInfo, ...],
+        *,
+        show_menu_on_last: bool,
+    ) -> None:
+        groups = group_kkt_by_account(items)
+        sent_count = 0
+        total = len(items)
+        for label, account_items in groups:
+            await message.answer(
+                f"<b>Акк {html.escape(label)}:</b>",
+                parse_mode="HTML",
+            )
+            for number, item in enumerate(account_items, 1):
+                sent_count += 1
+                await message.answer(
+                    format_kkt(item, number),
+                    parse_mode="HTML",
+                    reply_markup=(
+                        MENU
+                        if show_menu_on_last and sent_count == total
+                        else None
+                    ),
+                )
 
     async def search(self, message: Message, inn: str) -> None:
         sender = message.from_user
@@ -220,7 +296,10 @@ class BotService:
 
         self._last_lookup[sender.id] = now
         self._active_users.add(sender.id)
-        status = await message.answer("Получаю ККТ из СБИС…", reply_markup=MENU)
+        status = await message.answer(
+            "Запускаю поиск ККТ по ИНН…",
+            reply_markup=MENU,
+        )
         loop = asyncio.get_running_loop()
 
         async def update_status(text: str) -> None:
@@ -250,36 +329,40 @@ class BotService:
                 return
 
             if total > 6:
-                nearest = result.cash_registers[:2]
-                remaining = result.cash_registers[2:]
+                nearest = tuple(
+                    sorted(
+                        result.cash_registers,
+                        key=replacement_sort_key,
+                    )[:2]
+                )
                 summary = (
                     f"<b>Найдено касс: {total} шт.</b>\n"
                     "Две ближайшие замены показаны ниже. "
-                    f"Остальные {len(remaining)} шт. — в файле."
+                    "Полный список — в файле."
                 )
                 try:
                     await status.edit_text(summary, parse_mode="HTML")
                 except TelegramAPIError:
                     await message.answer(summary, parse_mode="HTML")
 
-                for index, item in enumerate(nearest, 1):
-                    await message.answer(
-                        format_kkt(item, index),
-                        parse_mode="HTML",
-                    )
+                await self.send_grouped_kkt(
+                    message,
+                    nearest,
+                    show_menu_on_last=False,
+                )
 
                 with TemporaryDirectory(prefix="inn_bot_") as directory:
-                    output = Path(directory) / f"kkt_{inn}_remaining.xlsx"
+                    output = Path(directory) / f"kkt_{inn}_all.xlsx"
                     await asyncio.to_thread(
                         export_kkt,
-                        remaining,
+                        result.cash_registers,
                         output,
                     )
                     await message.answer_document(
                         FSInputFile(output, filename=output.name),
                         caption=(
-                            f"Остальные кассы по ИНН {inn}: "
-                            f"{len(remaining)} шт."
+                            f"Все кассы по ИНН {inn}: "
+                            f"{total} шт."
                         ),
                         reply_markup=MENU,
                     )
@@ -293,12 +376,11 @@ class BotService:
             except TelegramAPIError:
                 pass
 
-            for index, item in enumerate(result.cash_registers, 1):
-                await message.answer(
-                    format_kkt(item, index),
-                    parse_mode="HTML",
-                    reply_markup=MENU if index == total else None,
-                )
+            await self.send_grouped_kkt(
+                message,
+                result.cash_registers,
+                show_menu_on_last=True,
+            )
         except Exception as error:
             print(f"Ошибка поиска по ИНН: {type(error).__name__}: {error}")
             await message.answer(
@@ -334,6 +416,45 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
     async def whoami(message: Message) -> None:
         if message.from_user:
             await message.answer(f"Ваш Telegram User ID: {message.from_user.id}")
+
+    @router.message(Command("checkacc", ignore_case=True))
+    async def check_accounts(message: Message, command: CommandObject) -> None:
+        try:
+            inn = normalize_inn(command.args or "")
+        except ValueError:
+            await message.answer("Использование: <code>/checkAcc ИНН</code>", parse_mode="HTML")
+            return
+
+        status = await message.answer("Проверяю все активные аккаунты и их ККТ…")
+        try:
+            result = await asyncio.to_thread(collect_kkt_by_inn, inn)
+        except Exception as error:
+            print(f"Ошибка /checkAcc: {type(error).__name__}: {error}")
+            await status.edit_text("Не удалось проверить аккаунты в СБИС.")
+            return
+
+        statistics = result.get("account_statistics") or []
+        total_registry = sum(
+            int(item.get("registry_kkt_count") or 0) for item in statistics
+        )
+        total_loaded = sum(
+            int(item.get("loaded_kkt_count") or 0) for item in statistics
+        )
+        summary = (
+            f"<b>Проверка ИНН:</b> <code>{html.escape(inn)}</code>\n"
+            f"<b>Аккаунтов:</b> <code>{len(statistics)}</code>\n"
+            f"<b>ККТ в Registry:</b> <code>{total_registry}</code>\n"
+            f"<b>Карточек KKT.Read:</b> <code>{total_loaded}</code>\n"
+            f"<b>Пропущено:</b> <code>{len(result.get('skipped_items') or [])}</code>\n"
+            f"<b>Ошибок:</b> <code>{len(result.get('errors') or [])}</code>"
+        )
+        await status.edit_text(summary, parse_mode="HTML")
+        for index, account_statistics in enumerate(statistics, 1):
+            await message.answer(
+                format_account_statistics(account_statistics, index),
+                parse_mode="HTML",
+                reply_markup=MENU if index == len(statistics) else None,
+            )
 
     @router.message(Command("allow"))
     async def allow_user(message: Message, command: CommandObject) -> None:
@@ -446,6 +567,7 @@ async def run(settings: Settings) -> None:
                 BotCommand(command="start", description="Открыть меню"),
                 BotCommand(command="inn", description="Найти ККТ по ИНН"),
                 BotCommand(command="whoami", description="Показать Telegram ID"),
+                BotCommand(command="checkacc", description="Проверить аккаунты по ИНН"),
                 BotCommand(command="allow", description="Админ: разрешить доступ"),
                 BotCommand(command="deny", description="Админ: запретить доступ"),
                 BotCommand(command="whitelist", description="Админ: белый список"),

@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug SbisShortCut",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/bot.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true,
+      "subProcess": true
+    }
+  ]
+}

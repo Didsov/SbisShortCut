@@ -1,3 +1,4 @@
+import calendar
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -15,6 +16,8 @@ class KKTInfo:
     fn_end_date: str | None
     ofd_end_date: str | None
     sales_point_address: str | None = None
+    account_id: int | None = None
+    account_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ class KKTLookupResult:
     expired_kkt_count: int
     cash_registers: tuple[KKTInfo, ...]
     errors: tuple[str, ...]
+    skip_metrics: tuple[tuple[str, int], ...] = ()
 
 
 def normalize_inn(value: str) -> str:
@@ -98,6 +102,8 @@ def _parse(item: dict, owner_inn: str) -> KKTInfo | None:
             or detail.get("Адрес")
             or registry.get("Address")
         ),
+        account_id=item.get("account_id"),
+        account_name=_text(item.get("account_name")),
     )
 
 
@@ -115,6 +121,49 @@ def replacement_sort_key(
     return (abs((fn_date - report_date).days), fn_date.isoformat(), item.reg_number)
 
 
+def _add_months(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def fn_replacement_status(
+    item: KKTInfo,
+    *,
+    today: date | None = None,
+) -> tuple[str, str]:
+    """Возвращает цветной маркер и текст срочности замены ФН."""
+    report_date = today or date.today()
+    try:
+        fn_date = date.fromisoformat(str(item.fn_end_date)[:10])
+    except (TypeError, ValueError):
+        return ("⚪", "срок не распознан")
+    if fn_date < report_date:
+        return ("⚫", "срок истёк")
+    if fn_date < _add_months(report_date, 1):
+        return ("🔴", "замена менее чем через месяц")
+    if fn_date <= _add_months(report_date, 4):
+        return ("🟡", "замена в течение четырёх месяцев")
+    return ("🟢", "замена более чем через четыре месяца")
+
+
+def display_sort_key(item: KKTInfo) -> tuple[str, str]:
+    """Сортировка для выдачи: дальние сроки первыми, истёкшие последними."""
+    try:
+        normalized = date.fromisoformat(str(item.fn_end_date)[:10]).isoformat()
+    except (TypeError, ValueError):
+        normalized = "0001-01-01"
+    return (normalized, item.reg_number)
+
+
+def _candidate_quality(raw_item: dict, parsed: KKTInfo) -> tuple[int, str]:
+    detail = raw_item.get("kkt") if isinstance(raw_item.get("kkt"), dict) else {}
+    active_score = 1 if detail.get("Действующая") is True else 0
+    return (active_score, str(parsed.fn_end_date or ""))
+
+
 def find_all_kkt_by_owner_inn(
     owner_inn: str,
     *,
@@ -123,18 +172,44 @@ def find_all_kkt_by_owner_inn(
     owner_inn = normalize_inn(owner_inn)
     if status_callback:
         status_callback("Получаю аккаунты и реестр ККТ из СБИС…")
-    raw = collect_kkt_by_inn(owner_inn)
-    selected: list[KKTInfo] = []
-    seen: set[str] = set()
+    raw = collect_kkt_by_inn(
+        owner_inn,
+        status_callback=status_callback,
+    )
+    selected_by_reg_number: dict[str, tuple[dict, KKTInfo]] = {}
+    skip_metrics = {
+        str(reason): int(count)
+        for reason, count in (raw.get("skip_metrics") or {}).items()
+    }
+
+    def record_skip(reason: str) -> None:
+        skip_metrics[reason] = int(skip_metrics.get(reason, 0)) + 1
+
     for item in raw.get("kkt") or []:
         parsed = _parse(item, owner_inn)
-        if parsed is None or parsed.reg_number in seen:
+        if parsed is None:
+            record_skip("parse_failed")
             continue
         if not parsed.fn_end_date:
+            record_skip("missing_fn_end_date")
             continue
-        seen.add(parsed.reg_number)
-        selected.append(parsed)
-    selected.sort(key=replacement_sort_key)
+        previous = selected_by_reg_number.get(parsed.reg_number)
+        if previous is None:
+            selected_by_reg_number[parsed.reg_number] = (item, parsed)
+            continue
+        if _candidate_quality(item, parsed) > _candidate_quality(*previous):
+            record_skip("duplicate_complete_replaced")
+            selected_by_reg_number[parsed.reg_number] = (item, parsed)
+        else:
+            record_skip("duplicate_complete_kept")
+
+    selected = [parsed for _raw_item, parsed in selected_by_reg_number.values()]
+    selected.sort(key=display_sort_key, reverse=True)
+    print(
+        "[FILTER_SUMMARY] "
+        f"INN={owner_inn} raw_kkt={len(raw.get('kkt') or [])} "
+        f"selected={len(selected)} skip_metrics={skip_metrics}"
+    )
     if status_callback:
         status_callback("Формирую результат…")
     errors = tuple(str(error) for error in (raw.get("errors") or []))
@@ -146,4 +221,5 @@ def find_all_kkt_by_owner_inn(
         expired_kkt_count=0,
         cash_registers=tuple(selected),
         errors=errors,
+        skip_metrics=tuple(sorted(skip_metrics.items())),
     )
