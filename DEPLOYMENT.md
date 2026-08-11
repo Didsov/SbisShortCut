@@ -58,13 +58,17 @@ chown inntophone:inntophone .env
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=токен_бота
-TELEGRAM_ALLOWED_USER_IDS=telegram_id_1,telegram_id_2
+TELEGRAM_ADMIN_USER_IDS=telegram_id_администратора
+TELEGRAM_ALLOWED_USER_IDS=
+TELEGRAM_WHITELIST_PATH=data/whitelist.json
 SBIS_COOKIES=актуальная_строка_cookie
 KKT_BOT_LOG_PATH=
 ```
 
-Пустой `KKT_BOT_LOG_PATH` оставляет журнал в systemd/journald. `.env` исключён
-из Git. Не копируйте токен или Cookie в unit-файл и не публикуйте их в логах.
+Пустой `KKT_BOT_LOG_PATH` оставляет журнал в systemd/journald. `.env` и
+динамический `data/whitelist.json` исключены из Git. Не копируйте токен или
+Cookie в unit-файл и не публикуйте их в логах. Администратор добавляет обычного
+пользователя командой `/allow TELEGRAM_USER_ID`; перезапуск службы не требуется.
 
 ## 5. Проверка до запуска
 
@@ -74,7 +78,7 @@ sudo -u inntophone -H .venv/bin/python -m unittest discover -s tests -v
 sudo -u inntophone -H .venv/bin/python -m py_compile \
   bot.py lookup.py excel_export.py services/live_collector.py
 sudo -u inntophone -H .venv/bin/python -c \
-  "from config.settings import load_settings; s=load_settings(); print('Настройки загружены, пользователей:', len(s.allowed_user_ids))"
+  "from config.settings import load_settings; s=load_settings(); print('Настройки загружены, администраторов:', len(s.admin_user_ids))"
 ```
 
 Последняя команда не выводит токен и Cookie.

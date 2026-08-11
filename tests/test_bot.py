@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from bot import WhitelistStore, format_kkt, normalize_inn
@@ -12,9 +14,30 @@ class BotTests(unittest.TestCase):
             normalize_inn("123")
 
     def test_whitelist_from_environment(self) -> None:
-        store = WhitelistStore(frozenset({1, 2}))
-        self.assertTrue(store.is_allowed(2))
-        self.assertFalse(store.is_allowed(3))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "whitelist.json"
+            store = WhitelistStore(
+                path,
+                admin_user_ids=frozenset({1}),
+                configured_user_ids=frozenset({2}),
+            )
+            self.assertTrue(store.is_allowed(1))
+            self.assertTrue(store.is_allowed(2))
+            self.assertFalse(store.is_allowed(3))
+            self.assertTrue(store.add(3))
+            self.assertTrue(WhitelistStore(
+                path,
+                admin_user_ids=frozenset({1}),
+            ).is_allowed(3))
+
+    def test_admin_cannot_be_removed_from_whitelist(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = WhitelistStore(
+                Path(directory) / "whitelist.json",
+                admin_user_ids=frozenset({1}),
+            )
+            with self.assertRaises(PermissionError):
+                store.remove(1)
 
     def test_format_kkt_uses_html_and_copyable_values(self) -> None:
         item = KKTInfo(

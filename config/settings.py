@@ -30,28 +30,32 @@ def _path(name: str, default: str) -> Path:
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
+    admin_user_ids: frozenset[int]
     allowed_user_ids: frozenset[int]
     sbis_cookies: str
+    whitelist_path: Path
     log_path: Path | None
 
 
 def load_settings() -> Settings:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     cookies = os.environ.get("SBIS_COOKIES", "").strip()
-    allowed_users = _user_ids(
-        os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
-        or os.environ.get("TELEGRAM_ADMIN_USER_IDS", "")
-    )
+    admins = _user_ids(os.environ.get("TELEGRAM_ADMIN_USER_IDS", ""))
+    allowed_users = _user_ids(os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
     log_value = os.environ.get("KKT_BOT_LOG_PATH", "").strip()
 
     if not token:
         raise RuntimeError("В .env не задан TELEGRAM_BOT_TOKEN")
     if not cookies:
         raise RuntimeError("В .env не задан SBIS_COOKIES")
+    if not admins:
+        raise RuntimeError("В .env не заданы TELEGRAM_ADMIN_USER_IDS")
 
     return Settings(
         telegram_token=token,
+        admin_user_ids=admins,
         allowed_user_ids=allowed_users,
         sbis_cookies=cookies,
+        whitelist_path=_path("TELEGRAM_WHITELIST_PATH", "data/whitelist.json"),
         log_path=_path("KKT_BOT_LOG_PATH", log_value) if log_value else None,
     )

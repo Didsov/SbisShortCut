@@ -1,11 +1,14 @@
 import asyncio
 import html
+import json
+import os
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import RLock
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -47,14 +50,108 @@ def normalize_inn(value: str) -> str:
     return inn
 
 
-class WhitelistStore:
-    """Белый список из `.env`, без файлового или иного хранилища."""
+def parse_user_id(value: str | None) -> int:
+    text = str(value or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        raise ValueError("Telegram User ID должен быть положительным числом")
+    return int(text)
 
-    def __init__(self, allowed_user_ids: frozenset[int]) -> None:
-        self.allowed_user_ids = allowed_user_ids
+
+class WhitelistStore:
+    """Администраторы из `.env` и изменяемый whitelist в JSON-файле."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        admin_user_ids: frozenset[int],
+        configured_user_ids: frozenset[int] = frozenset(),
+    ) -> None:
+        self.path = path.resolve()
+        self.admin_user_ids = admin_user_ids
+        self.configured_user_ids = configured_user_ids
+        self._user_ids: set[int] = set()
+        self._lock = RLock()
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.is_file():
+            return
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        values = payload.get("allowed_user_ids")
+        if not isinstance(values, list):
+            raise RuntimeError("Whitelist должен содержать allowed_user_ids")
+        self._user_ids = {parse_user_id(str(value)) for value in values}
+        self._user_ids.difference_update(self.admin_user_ids)
+        self._user_ids.difference_update(self.configured_user_ids)
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(
+                    {"allowed_user_ids": sorted(self._user_ids)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self.admin_user_ids
 
     def is_allowed(self, user_id: int) -> bool:
-        return user_id in self.allowed_user_ids
+        with self._lock:
+            return (
+                self.is_admin(user_id)
+                or user_id in self.configured_user_ids
+                or user_id in self._user_ids
+            )
+
+    def add(self, user_id: int) -> bool:
+        user_id = parse_user_id(str(user_id))
+        with self._lock:
+            if self.is_allowed(user_id):
+                return False
+            self._user_ids.add(user_id)
+            try:
+                self._save()
+            except Exception:
+                self._user_ids.remove(user_id)
+                raise
+            return True
+
+    def remove(self, user_id: int) -> bool:
+        user_id = parse_user_id(str(user_id))
+        if self.is_admin(user_id):
+            raise PermissionError("Администратора нельзя удалить")
+        if user_id in self.configured_user_ids:
+            raise PermissionError("Пользователь задан в .env")
+        with self._lock:
+            if user_id not in self._user_ids:
+                return False
+            self._user_ids.remove(user_id)
+            try:
+                self._save()
+            except Exception:
+                self._user_ids.add(user_id)
+                raise
+            return True
+
+    def all_user_ids(self) -> tuple[int, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    self.admin_user_ids
+                    | self.configured_user_ids
+                    | self._user_ids
+                )
+            )
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -201,6 +298,13 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     router.message.outer_middleware(AccessMiddleware(whitelist))
 
+    async def require_admin(message: Message) -> bool:
+        sender = message.from_user
+        if sender is not None and whitelist.is_admin(sender.id):
+            return True
+        await message.answer("Команда доступна только администратору бота.")
+        return False
+
     @router.message(Command(commands=["start", "help", "menu"]))
     async def menu(message: Message, state: FSMContext) -> None:
         await state.clear()
@@ -214,6 +318,62 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
     async def whoami(message: Message) -> None:
         if message.from_user:
             await message.answer(f"Ваш Telegram User ID: {message.from_user.id}")
+
+    @router.message(Command("allow"))
+    async def allow_user(message: Message, command: CommandObject) -> None:
+        if not await require_admin(message):
+            return
+        try:
+            user_id = parse_user_id(command.args)
+            added = await asyncio.to_thread(whitelist.add, user_id)
+        except ValueError:
+            await message.answer("Использование: /allow TELEGRAM_USER_ID")
+            return
+        except OSError as error:
+            print(f"Ошибка сохранения whitelist: {type(error).__name__}: {error}")
+            await message.answer("Не удалось сохранить белый список.")
+            return
+        text = (
+            f"Пользователь <code>{user_id}</code> добавлен в белый список."
+            if added
+            else f"Пользователь <code>{user_id}</code> уже имеет доступ."
+        )
+        await message.answer(text, parse_mode="HTML")
+
+    @router.message(Command("deny"))
+    async def deny_user(message: Message, command: CommandObject) -> None:
+        if not await require_admin(message):
+            return
+        try:
+            user_id = parse_user_id(command.args)
+            removed = await asyncio.to_thread(whitelist.remove, user_id)
+        except ValueError:
+            await message.answer("Использование: /deny TELEGRAM_USER_ID")
+            return
+        except PermissionError as error:
+            await message.answer(str(error))
+            return
+        except OSError as error:
+            print(f"Ошибка сохранения whitelist: {type(error).__name__}: {error}")
+            await message.answer("Не удалось сохранить белый список.")
+            return
+        text = (
+            f"Пользователь <code>{user_id}</code> удалён из белого списка."
+            if removed
+            else f"Пользователя <code>{user_id}</code> нет в белом списке."
+        )
+        await message.answer(text, parse_mode="HTML")
+
+    @router.message(Command("whitelist"))
+    async def show_whitelist(message: Message) -> None:
+        if not await require_admin(message):
+            return
+        lines = ["<b>Белый список Telegram:</b>"]
+        for user_id in await asyncio.to_thread(whitelist.all_user_ids):
+            role = "администратор" if whitelist.is_admin(user_id) else "пользователь"
+            lines.append(f"<code>{user_id}</code> — {role}")
+        lines.extend(("", "Добавить: <code>/allow USER_ID</code>", "Удалить: <code>/deny USER_ID</code>"))
+        await message.answer("\n".join(lines), parse_mode="HTML")
 
     @router.message(Command("inn"))
     async def inn_command(message: Message, state: FSMContext, command: CommandObject) -> None:
@@ -256,7 +416,11 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
 
 
 async def run(settings: Settings) -> None:
-    whitelist = WhitelistStore(settings.allowed_user_ids)
+    whitelist = WhitelistStore(
+        settings.whitelist_path,
+        admin_user_ids=settings.admin_user_ids,
+        configured_user_ids=settings.allowed_user_ids,
+    )
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(BotService(), whitelist))
 
@@ -266,6 +430,9 @@ async def run(settings: Settings) -> None:
                 BotCommand(command="start", description="Открыть меню"),
                 BotCommand(command="inn", description="Найти ККТ по ИНН"),
                 BotCommand(command="whoami", description="Показать Telegram ID"),
+                BotCommand(command="allow", description="Админ: разрешить доступ"),
+                BotCommand(command="deny", description="Админ: запретить доступ"),
+                BotCommand(command="whitelist", description="Админ: белый список"),
             ]
         )
         await dispatcher.start_polling(
