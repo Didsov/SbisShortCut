@@ -1,4 +1,6 @@
 import json
+import re
+from datetime import date, datetime
 
 from models.kkt import (
     KKT,
@@ -41,6 +43,83 @@ def extract_ofd_end_date(
             return normalized
 
     return None
+
+
+def extract_software_version(detail: dict | None = None) -> str | None:
+    """Извлекает версию ПО из записи SoftwareInfo ответа KKT.Read."""
+    detail = detail if isinstance(detail, dict) else {}
+    software_info = detail.get("SoftwareInfo")
+
+    if not isinstance(software_info, (dict, list, tuple)):
+        normalized = str(software_info).strip() if software_info is not None else ""
+        return normalized or None
+
+    version_keys = {
+        "currentversion",
+        "version",
+        "softwareversion",
+        "softwareversionnumber",
+        "firmwareversion",
+        "версия",
+        "версияпо",
+        "версияпрошивки",
+        "номерверсии",
+    }
+
+    def shown_date(value) -> str | None:
+        normalized = str(value).strip() if value is not None else ""
+        if not normalized:
+            return None
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00")).date()
+        except ValueError:
+            try:
+                parsed = date.fromisoformat(normalized[:10])
+            except ValueError:
+                return normalized
+        return parsed.strftime("%d.%m.%y")
+
+    def find_version(value) -> str | None:
+        if isinstance(value, dict):
+            normalized_fields = {
+                re.sub(r"[^a-zа-я0-9]", "", str(key).lower()): nested_value
+                for key, nested_value in value.items()
+            }
+            current_version = normalized_fields.get("currentversion")
+            normalized_current_version = (
+                str(current_version).strip()
+                if current_version is not None
+                else ""
+            )
+            if normalized_current_version:
+                current_date = shown_date(normalized_fields.get("currentversiondate"))
+                return (
+                    f"{normalized_current_version} от {current_date}"
+                    if current_date
+                    else normalized_current_version
+                )
+            for key, nested_value in value.items():
+                normalized_key = re.sub(r"[^a-zа-я0-9]", "", str(key).lower())
+                if normalized_key in version_keys:
+                    normalized_value = (
+                        str(nested_value).strip()
+                        if nested_value is not None
+                        else ""
+                    )
+                    if normalized_value:
+                        return normalized_value
+            for nested_value in value.values():
+                found = find_version(nested_value)
+                if found:
+                    return found
+        elif isinstance(value, (list, tuple)):
+            for nested_value in value:
+                found = find_version(nested_value)
+                if found:
+                    return found
+        return None
+
+    return find_version(software_info)
 
 def parse_used_for(value) -> dict:
     if isinstance(value, dict):

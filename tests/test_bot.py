@@ -19,6 +19,7 @@ from lookup import (
     fn_replacement_status,
     replacement_sort_key,
 )
+from parsers.kkt import extract_software_version
 from services.live_collector import collect_kkt_by_inn
 
 
@@ -65,12 +66,55 @@ class BotTests(unittest.TestCase):
             ofd_end_date=None,
             account_id=42,
             account_name="Основной",
+            software_version="5.8.100 & test",
         )
         text = format_kkt(item, 1)
         self.assertIn("<b>Касса №1</b>", text)
         self.assertIn("<code>1234567890</code>", text)
         self.assertIn("Иванов &lt;И.И.&gt;", text)
         self.assertIn("<code>42 — Основной</code>", text)
+        self.assertIn("<b>Версия ПО:</b> <code>5.8.100 &amp; test</code>", text)
+
+    def test_format_kkt_shows_dash_without_software_version(self) -> None:
+        item = KKTInfo(
+            owner_inn="1234567890",
+            owner_name=None,
+            model=None,
+            reg_number="0001",
+            manufacturer_number=None,
+            fn_end_date="2027-01-01",
+            ofd_end_date=None,
+        )
+
+        self.assertIn("<b>Версия ПО:</b> <code>—</code>", format_kkt(item, 1))
+
+    def test_extract_software_version_from_kkt_read_record(self) -> None:
+        self.assertEqual(
+            extract_software_version(
+                {"SoftwareInfo": {"Name": "ПО ККТ", "Version": "5.8.100"}}
+            ),
+            "5.8.100",
+        )
+        self.assertEqual(
+            extract_software_version(
+                {"SoftwareInfo": {"ККТ": {"Версия ПО": "3.0.2"}}}
+            ),
+            "3.0.2",
+        )
+        self.assertEqual(
+            extract_software_version(
+                {
+                    "SoftwareInfo": {
+                        "RegId": "0009465175054554",
+                        "CurrentVersion": "C.3.63074.0",
+                        "CurrentVersionDate": "2026-06-02",
+                        "LatestVersion": "C.3.63074.0",
+                    }
+                }
+            ),
+            "C.3.63074.0 от 02.06.26",
+        )
+        self.assertIsNone(extract_software_version({"SoftwareInfo": {}}))
 
     def test_kkt_are_grouped_by_account(self) -> None:
         def item(account_id: int, reg_number: str) -> KKTInfo:
@@ -171,7 +215,14 @@ class BotTests(unittest.TestCase):
                     "account_name": "Основной аккаунт",
                     "sales_point_address": "Адрес магазина",
                     "registry": {"KKTRegId": "0001", "INN": "1234567890"},
-                    "kkt": {"ИНН": "1234567890", "FSEndDate": "2018-01-01"},
+                    "kkt": {
+                        "ИНН": "1234567890",
+                        "FSEndDate": "2018-01-01",
+                        "SoftwareInfo": {
+                            "CurrentVersion": "C.3.63074.0",
+                            "CurrentVersionDate": "2026-06-02",
+                        },
+                    },
                 }
             ],
             "errors": [],
@@ -182,6 +233,10 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result.cash_registers[0].sales_point_address, "Адрес магазина")
         self.assertEqual(result.cash_registers[0].account_id, 10)
         self.assertEqual(result.cash_registers[0].account_name, "Основной аккаунт")
+        self.assertEqual(
+            result.cash_registers[0].software_version,
+            "C.3.63074.0 от 02.06.26",
+        )
 
     @patch("lookup.collect_kkt_by_inn")
     def test_kkt_without_fn_date_is_filtered(self, collector) -> None:

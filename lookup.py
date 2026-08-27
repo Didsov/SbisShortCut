@@ -2,7 +2,7 @@ import calendar
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from parsers.kkt import extract_ofd_end_date
+from parsers.kkt import extract_ofd_end_date, extract_software_version
 from services.live_collector import collect_kkt_by_inn
 
 
@@ -18,6 +18,7 @@ class KKTInfo:
     sales_point_address: str | None = None
     account_id: int | None = None
     account_name: str | None = None
+    software_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ def _parse(item: dict, owner_inn: str) -> KKTInfo | None:
         ),
         account_id=item.get("account_id"),
         account_name=_text(item.get("account_name")),
+        software_version=extract_software_version(detail),
     )
 
 

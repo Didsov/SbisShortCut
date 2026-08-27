@@ -38,6 +38,15 @@ Copy-Item .env.example .env
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+## Получение списка ККТ из консоли
+
+CLI использует `SBIS_COOKIES` из `.env` и печатает все найденные кассы в том же
+порядке и составе полей, что Telegram-бот:
+
+```powershell
+.venv\Scripts\python.exe -X utf8 cli.py 253900152591
+```
+
 ## Развёртывание на сервере
 
 Пошаговая установка под systemd и пользователя `inntophone` описана в
