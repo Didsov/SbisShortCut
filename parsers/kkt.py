@@ -121,6 +121,46 @@ def extract_software_version(detail: dict | None = None) -> str | None:
 
     return find_version(software_info)
 
+
+def extract_fn_number(detail: dict | None = None) -> str | None:
+    """Извлекает заводской номер ФН из ответа KKT.Read."""
+    detail = detail if isinstance(detail, dict) else {}
+    fiscal_item = detail.get("fiscalItem")
+    fiscal_item = fiscal_item if isinstance(fiscal_item, dict) else {}
+
+    for key in (
+        "НомерРегистрационный",
+        "НомерФН",
+        "ЗаводскойНомер",
+        "SerialNumber",
+    ):
+        value = fiscal_item.get(key)
+        normalized = str(value).strip() if value is not None else ""
+        if normalized:
+            return normalized
+
+    used_for = parse_used_for(detail.get("used_for") or detail.get("ГдеИспользуется"))
+    value = used_for.get("old_fn")
+    normalized = str(value).strip() if value is not None else ""
+    return normalized or None
+
+
+def extract_fn_model(detail: dict | None = None) -> str | None:
+    """Сокращает модель ФН из KKT.Read до вида АВ-15 или ИН-36."""
+    detail = detail if isinstance(detail, dict) else {}
+    fiscal_item = detail.get("fiscalItem")
+    fiscal_item = fiscal_item if isinstance(fiscal_item, dict) else {}
+
+    model = str(fiscal_item.get("Модель") or "").strip()
+    match = re.search(
+        r"(?:исполнени[ея]\s+)?(ав|ин)\s*-?\s*(15|36)(?:\D|$)",
+        model,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return f"{match.group(1).upper()}-{match.group(2)}"
+
 def parse_used_for(value) -> dict:
     if isinstance(value, dict):
         return value

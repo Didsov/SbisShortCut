@@ -201,6 +201,8 @@ def format_kkt(item: KKTInfo, number: int) -> str:
             f"<b>Модель:</b> {shown(item.model)}",
             f"<b>РНМ:</b> {shown(item.reg_number)}",
             f"<b>Заводской номер:</b> {shown(item.manufacturer_number)}",
+            f"<b>ЗН ФН:</b> {shown(item.fn_number)}",
+            f"<b>Модель ФН:</b> {shown(item.fn_model)}",
             f"<b>Срок ФН:</b> {shown(item.fn_end_date)}",
             f"<b>Срок ОФД:</b> {shown(item.ofd_end_date)}",
             f"<b>Версия ПО:</b> {shown(item.software_version)}",

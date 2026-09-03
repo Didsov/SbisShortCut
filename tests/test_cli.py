@@ -35,6 +35,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("**Касса №2**", text)
         self.assertIn("**Версия ПО:** `5.8.100`", text)
         self.assertIn("**Версия ПО:** `—`", text)
+        self.assertIn("**ЗН ФН:** `7384440900648419`", text)
+        self.assertIn("**Модель ФН:** `АВ-15`", text)
         self.assertNotIn("<b>", text)
         self.assertLess(text.index("RNM-1"), text.index("RNM-2"))
 
@@ -62,6 +64,8 @@ class CliTests(unittest.TestCase):
             account_id=5588947,
             account_name="Голованова Наталия Леонидовна, ИП",
             software_version=software_version,
+            fn_number="7384440900648419",
+            fn_model="АВ-15",
         )
 
 

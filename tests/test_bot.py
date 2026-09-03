@@ -19,7 +19,11 @@ from lookup import (
     fn_replacement_status,
     replacement_sort_key,
 )
-from parsers.kkt import extract_software_version
+from parsers.kkt import (
+    extract_fn_model,
+    extract_fn_number,
+    extract_software_version,
+)
 from services.live_collector import collect_kkt_by_inn
 
 
@@ -67,6 +71,8 @@ class BotTests(unittest.TestCase):
             account_id=42,
             account_name="Основной",
             software_version="5.8.100 & test",
+            fn_number="7384440900648419",
+            fn_model="АВ-15",
         )
         text = format_kkt(item, 1)
         self.assertIn("<b>Касса №1</b>", text)
@@ -74,6 +80,8 @@ class BotTests(unittest.TestCase):
         self.assertIn("Иванов &lt;И.И.&gt;", text)
         self.assertIn("<code>42 — Основной</code>", text)
         self.assertIn("<b>Версия ПО:</b> <code>5.8.100 &amp; test</code>", text)
+        self.assertIn("<b>ЗН ФН:</b> <code>7384440900648419</code>", text)
+        self.assertIn("<b>Модель ФН:</b> <code>АВ-15</code>", text)
 
     def test_format_kkt_shows_dash_without_software_version(self) -> None:
         item = KKTInfo(
@@ -86,7 +94,10 @@ class BotTests(unittest.TestCase):
             ofd_end_date=None,
         )
 
-        self.assertIn("<b>Версия ПО:</b> <code>—</code>", format_kkt(item, 1))
+        text = format_kkt(item, 1)
+        self.assertIn("<b>Версия ПО:</b> <code>—</code>", text)
+        self.assertIn("<b>ЗН ФН:</b> <code>—</code>", text)
+        self.assertIn("<b>Модель ФН:</b> <code>—</code>", text)
 
     def test_extract_software_version_from_kkt_read_record(self) -> None:
         self.assertEqual(
@@ -115,6 +126,36 @@ class BotTests(unittest.TestCase):
             "C.3.63074.0 от 02.06.26",
         )
         self.assertIsNone(extract_software_version({"SoftwareInfo": {}}))
+
+    def test_extract_fiscal_storage_from_kkt_read_record(self) -> None:
+        detail = {
+            "fiscalItem": {
+                "Модель": (
+                    "Шифровальное средство фискальный накопитель "
+                    "«ФН-1.2 исполнение Ав15-4»"
+                ),
+                "НомерРегистрационный": "7384440900648419",
+            },
+            "used_for": {"old_fn": "0000000000000000"},
+        }
+
+        self.assertEqual(extract_fn_number(detail), "7384440900648419")
+        self.assertEqual(extract_fn_model(detail), "АВ-15")
+        self.assertEqual(
+            extract_fn_model(
+                {"fiscalItem": {"Модель": "ФН-1.2 исполнение Ин36-4"}}
+            ),
+            "ИН-36",
+        )
+
+    def test_extract_fiscal_storage_uses_fallbacks_and_no_date_guess(self) -> None:
+        self.assertEqual(
+            extract_fn_number({"used_for": {"old_fn": "7384440900872250"}}),
+            "7384440900872250",
+        )
+        self.assertIsNone(
+            extract_fn_model({"FSEndDate": "2027-04-17"})
+        )
 
     def test_kkt_are_grouped_by_account(self) -> None:
         def item(account_id: int, reg_number: str) -> KKTInfo:
@@ -222,6 +263,10 @@ class BotTests(unittest.TestCase):
                             "CurrentVersion": "C.3.63074.0",
                             "CurrentVersionDate": "2026-06-02",
                         },
+                        "fiscalItem": {
+                            "Модель": "ФН-1.2 исполнение Ин36-4",
+                            "НомерРегистрационный": "7384440900648419",
+                        },
                     },
                 }
             ],
@@ -237,6 +282,8 @@ class BotTests(unittest.TestCase):
             result.cash_registers[0].software_version,
             "C.3.63074.0 от 02.06.26",
         )
+        self.assertEqual(result.cash_registers[0].fn_number, "7384440900648419")
+        self.assertEqual(result.cash_registers[0].fn_model, "ИН-36")
 
     @patch("lookup.collect_kkt_by_inn")
     def test_kkt_without_fn_date_is_filtered(self, collector) -> None:
