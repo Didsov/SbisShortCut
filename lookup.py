@@ -177,6 +177,7 @@ def _candidate_quality(raw_item: dict, parsed: KKTInfo) -> tuple[int, str]:
 
 def find_all_kkt_by_owner_inn(
     owner_inn: str,
+    kpp: str | None = None,
     *,
     status_callback=None,
 ) -> KKTLookupResult:
@@ -185,7 +186,9 @@ def find_all_kkt_by_owner_inn(
         status_callback("Получаю аккаунты и реестр ККТ из СБИС…")
     raw = collect_kkt_by_inn(
         owner_inn,
+        kpp,
         status_callback=status_callback,
+        
     )
     selected_by_reg_number: dict[str, tuple[dict, KKTInfo]] = {}
     skip_metrics = {

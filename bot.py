@@ -56,6 +56,26 @@ def normalize_inn(value: str) -> str:
         raise ValueError("ИНН должен содержать 10 или 12 цифр")
     return inn
 
+def parse_inn_kpp(value: str) -> tuple[str, str | None]:
+    parts = value.strip().split()
+
+    if not parts:
+        raise ValueError
+
+    inn = normalize_inn(parts[0])
+
+    kpp = None
+    if len(parts) > 1:
+        kpp = parts[1].strip()
+
+        if not kpp.isdigit() or len(kpp) != 9:
+            raise ValueError
+
+    if len(parts) > 2:
+        raise ValueError
+
+    return inn, kpp
+
 
 def parse_user_id(value: str | None) -> int:
     text = str(value or "").strip()
@@ -284,7 +304,7 @@ class BotService:
                     ),
                 )
 
-    async def search(self, message: Message, inn: str) -> None:
+    async def search(self, message: Message, inn: str, kpp: str | None = None) -> None:
         sender = message.from_user
         if sender is None:
             return
@@ -320,6 +340,7 @@ class BotService:
             result = await asyncio.to_thread(
                 find_all_kkt_by_owner_inn,
                 inn,
+                kpp,
                 status_callback=report,
             )
             total = len(result.cash_registers)
@@ -516,16 +537,35 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
         await message.answer("\n".join(lines), parse_mode="HTML")
 
     @router.message(Command("inn"))
-    async def inn_command(message: Message, state: FSMContext, command: CommandObject) -> None:
+    async def inn_command(
+        message: Message,
+        state: FSMContext,
+        command: CommandObject,
+    ) -> None:
         if command.args:
             try:
                 await state.clear()
-                await service.search(message, normalize_inn(command.args))
+
+                inn, kpp = parse_inn_kpp(command.args)
+
+                await service.search(
+                    message,
+                    inn,
+                    kpp=kpp,
+                )
+
             except ValueError:
-                await message.answer("ИНН должен содержать 10 или 12 цифр.")
+                await message.answer(
+                    "Введите ИНН из 10 или 12 цифр.\n"
+                    "Для юрлица можно указать КПП через пробел:\n"
+                    "/inn 2801201513 253701001"
+                )
         else:
             await state.set_state(SearchForm.waiting_inn)
-            await message.answer("Введите ИНН:", reply_markup=ForceReply(selective=True))
+            await message.answer(
+                "Введите ИНН или ИНН и КПП через пробел:",
+                reply_markup=ForceReply(selective=True),
+            )
 
     @router.message(F.text == SEARCH_BUTTON)
     async def search_button(message: Message, state: FSMContext) -> None:
@@ -533,26 +573,49 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
         await message.answer("Введите ИНН:", reply_markup=ForceReply(selective=True))
 
     @router.message(SearchForm.waiting_inn, F.text)
-    async def waiting_inn(message: Message, state: FSMContext) -> None:
+    async def waiting_inn(
+        message: Message,
+        state: FSMContext,
+    ) -> None:
         try:
-            inn = normalize_inn(message.text or "")
+            inn, kpp = parse_inn_kpp(message.text or "")
+
         except ValueError:
-            await message.answer("ИНН должен содержать 10 или 12 цифр.")
+            await message.answer(
+                "Введите ИНН из 10 или 12 цифр.\n"
+                "Для юрлица можно указать КПП через пробел:\n"
+                "2801201513 253701001"
+            )
             return
+
         await state.clear()
-        await service.search(message, inn)
+
+        await service.search(
+            message,
+            inn,
+            kpp=kpp,
+    )
 
     @router.message(F.text)
     async def automatic_search(message: Message, state: FSMContext) -> None:
         try:
-            inn = normalize_inn(message.text or "")
+            inn, kpp = parse_inn_kpp(message.text or "")
         except ValueError:
-            await message.answer("Отправьте ИНН из 10 или 12 цифр.", reply_markup=MENU)
+            await message.answer(
+                "Отправьте ИНН из 10 или 12 цифр.\n"
+                "Для юрлица можно указать КПП через пробел:\n"
+                "2801201513 253701001",
+                reply_markup=MENU,
+            )
             return
-        await state.clear()
-        await service.search(message, inn)
 
-    return router
+        await state.clear()
+
+        await service.search(
+            message,
+            inn,
+            kpp=kpp,
+        )
 
 
 async def run(settings: Settings) -> None:
