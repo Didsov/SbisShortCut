@@ -617,6 +617,10 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
             kpp=kpp,
         )
 
+    return router
+
+
+
 
 async def run(settings: Settings) -> None:
     whitelist = WhitelistStore(
