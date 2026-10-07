@@ -39,7 +39,7 @@ class Settings:
 
 def load_settings() -> Settings:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    cookies = os.environ.get("SBIS_COOKIES", "").strip()
+    cookies = os.environ.get("SBIS_ONLINE_COOKIES", "").strip()
     admins = _user_ids(os.environ.get("TELEGRAM_ADMIN_USER_IDS", ""))
     allowed_users = _user_ids(os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
     log_value = os.environ.get("KKT_BOT_LOG_PATH", "").strip()

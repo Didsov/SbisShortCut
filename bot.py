@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import RLock
 from typing import Any
-
+from aiogram.types import CallbackQuery, Message
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError
@@ -24,6 +24,13 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+)
+
+from access_monitor import (
+    AccessMonitor,
+    UnknownUserMiddleware,
+    format_recent_unknown,
+    recent_unknown_keyboard,
 )
 
 from config.settings import Settings, load_settings
@@ -420,6 +427,19 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
     router.message.filter(F.chat.type == ChatType.PRIVATE)
     router.message.outer_middleware(AccessMiddleware(whitelist))
 
+
+
+    access_monitor = AccessMonitor(
+        whitelist.path.parent / "access_monitor.sqlite3"
+    )
+
+    router.message.outer_middleware(
+        UnknownUserMiddleware(
+            access_monitor,
+            whitelist.is_allowed,
+        )
+    )
+
     async def require_admin(message: Message) -> bool:
         sender = message.from_user
         if sender is not None and whitelist.is_admin(sender.id):
@@ -481,25 +501,128 @@ def build_router(service: BotService, whitelist: WhitelistStore) -> Router:
             )
 
     @router.message(Command("allow"))
-    async def allow_user(message: Message, command: CommandObject) -> None:
-        if not await require_admin(message):
+    async def allow_command(
+        message: Message,
+        command: CommandObject,
+    ) -> None:
+        sender = message.from_user
+
+        if sender is None or not whitelist.is_admin(sender.id):
             return
-        try:
-            user_id = parse_user_id(command.args)
-            added = await asyncio.to_thread(whitelist.add, user_id)
-        except ValueError:
-            await message.answer("Использование: /allow TELEGRAM_USER_ID")
+
+        args = (command.args or "").strip()
+
+        # Старое поведение:
+        # /allow 123456789
+        if args:
+            try:
+                user_id = int(args)
+
+                added = whitelist.add(user_id)
+
+            except (ValueError, TypeError):
+                await message.answer(
+                    "Использование:\n"
+                    "<code>/allow USER_ID</code>\n\n"
+                    "Или просто <code>/allow</code>, "
+                    "чтобы показать последних пользователей.",
+                    parse_mode="HTML",
+                )
+                return
+
+            except Exception as error:
+                await message.answer(
+                    f"Не удалось добавить пользователя: "
+                    f"<code>{type(error).__name__}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            if added:
+                await message.answer(
+                    f"Пользователь <code>{user_id}</code> "
+                    "добавлен в белый список.",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(
+                    f"Пользователь <code>{user_id}</code> "
+                    "уже находится в белом списке.",
+                    parse_mode="HTML",
+                )
+
             return
-        except OSError as error:
-            print(f"Ошибка сохранения whitelist: {type(error).__name__}: {error}")
-            await message.answer("Не удалось сохранить белый список.")
-            return
-        text = (
-            f"Пользователь <code>{user_id}</code> добавлен в белый список."
-            if added
-            else f"Пользователь <code>{user_id}</code> уже имеет доступ."
+
+        # Новое поведение:
+        # /allow
+        users = access_monitor.recent_unknown(
+            whitelist.is_allowed,
+            limit=10,
         )
-        await message.answer(text, parse_mode="HTML")
+
+        await message.answer(
+            format_recent_unknown(users),
+            parse_mode="HTML",
+            reply_markup=recent_unknown_keyboard(users),
+        )
+
+    @router.callback_query(F.data.startswith("allow_recent:"))
+    async def allow_recent_callback(
+        callback: CallbackQuery,
+    ) -> None:
+        sender = callback.from_user
+
+        if sender is None or not whitelist.is_admin(sender.id):
+            await callback.answer(
+                "Недостаточно прав.",
+                show_alert=True,
+            )
+            return
+
+        data = callback.data or ""
+
+        try:
+            user_id = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await callback.answer(
+                "Некорректный ID пользователя.",
+                show_alert=True,
+            )
+            return
+
+        try:
+            added = whitelist.add(user_id)
+        except Exception:
+            await callback.answer(
+                "Не удалось изменить белый список.",
+                show_alert=True,
+            )
+            return
+
+        if added:
+            await callback.answer("Пользователь добавлен.")
+        else:
+            await callback.answer("Пользователь уже разрешён.")
+
+        # Перестраиваем список:
+        # добавленный пользователь автоматически исчезнет,
+        # поскольку recent_unknown() сверяется с актуальным whitelist.
+        users = access_monitor.recent_unknown(
+            whitelist.is_allowed,
+            limit=10,
+        )
+
+        if callback.message is not None:
+            try:
+                await callback.message.edit_text(
+                    format_recent_unknown(users),
+                    parse_mode="HTML",
+                    reply_markup=recent_unknown_keyboard(users),
+                )
+            except Exception:
+                # Сам whitelist уже обновлён.
+                # Ошибка обновления старого сообщения не критична.
+                pass
 
     @router.message(Command("deny"))
     async def deny_user(message: Message, command: CommandObject) -> None:
